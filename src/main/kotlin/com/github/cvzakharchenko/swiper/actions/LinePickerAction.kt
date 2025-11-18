@@ -97,6 +97,7 @@ class LinePickerAction : DumbAwareAction(
         val list = JBList(listModel).apply {
             selectionMode = ListSelectionModel.SINGLE_SELECTION
             cellRenderer = LineEntryRenderer()
+            emptyText.text = ""
         }
         val rowHeight = list.getFontMetrics(list.font).height + JBUI.scale(3)
         list.fixedCellHeight = rowHeight
@@ -269,14 +270,14 @@ class LinePickerAction : DumbAwareAction(
         model.replaceAll(filtered)
         if (filtered.isEmpty()) {
             list.clearSelection()
-            resizePopupForItems(list, searchField, scrollPane, 0, popup, popupWidth)
+            resizePopupForItems(list, searchField, scrollPane, 0, popup, popupWidth, collapsed = true)
             return words
         }
         val caretIndex = filtered.indexOfFirst { it.lineNumber == caretLine }
         val targetIndex = if (caretIndex >= 0) caretIndex else 0
         list.selectedIndex = targetIndex
         list.ensureIndexIsVisible(targetIndex)
-        resizePopupForItems(list, searchField, scrollPane, filtered.size, popup, popupWidth)
+        resizePopupForItems(list, searchField, scrollPane, filtered.size, popup, popupWidth, collapsed = false)
         return words
     }
 
@@ -286,7 +287,8 @@ class LinePickerAction : DumbAwareAction(
         scrollPane: JScrollPane,
         itemCount: Int,
         popup: JBPopup?,
-        popupWidth: Int
+        popupWidth: Int,
+        collapsed: Boolean
     ) {
         popup ?: return
         val rows = if (itemCount <= 0) 1 else itemCount.coerceAtMost(MAX_VISIBLE_ROWS)
@@ -299,12 +301,14 @@ class LinePickerAction : DumbAwareAction(
         val listHeight = rowHeight * rows + list.insetsHeight()
         val searchHeight = searchField.preferredSize.height
         val scrollInsets = scrollPane.verticalPadding()
-        val minHeight = searchHeight + rowHeight + list.insetsHeight() + scrollInsets + POPUP_VERTICAL_PADDING
-        val totalHeight = (listHeight + searchHeight + scrollInsets + POPUP_VERTICAL_PADDING)
-            .coerceAtLeast(minHeight)
-            .coerceAtMost(POPUP_MAX_HEIGHT)
+        val minHeight = searchHeight + list.insetsHeight() + scrollInsets + POPUP_VERTICAL_PADDING
+        val desiredHeight = if (collapsed) searchHeight + JBUI.scale(12) else
+            (listHeight + searchHeight + scrollInsets + POPUP_VERTICAL_PADDING).coerceAtLeast(minHeight)
+        val totalHeight = desiredHeight.coerceAtMost(POPUP_MAX_HEIGHT)
 
         popup.setSize(Dimension(popupWidth, totalHeight))
+        list.isVisible = !collapsed
+        scrollPane.isVisible = !collapsed
     }
 
     private fun String?.parseSearchWords(): List<String> {
