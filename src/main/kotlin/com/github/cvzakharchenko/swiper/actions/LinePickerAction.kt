@@ -188,6 +188,8 @@ class LinePickerAction : DumbAwareAction(
                 }
                 if (!committedNavigation) {
                     previewController.restore()
+                } else {
+                    previewController.clearPreview()
                 }
                 searchHighlightManager.clear()
             }
@@ -531,6 +533,10 @@ class LinePickerAction : DumbAwareAction(
             val column = originalColumn.coerceAtLeast(0)
             editor.caretModel.moveToLogicalPosition(LogicalPosition(line, column))
             editor.scrollingModel.scrollToCaret(ScrollType.MAKE_VISIBLE)
+            clearPreview()
+        }
+
+        fun clearPreview() {
             lastPreviewTarget = null
             clearHighlight()
         }
