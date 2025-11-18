@@ -12,4 +12,14 @@
         <toolWindow factoryClass="com.github.cvzakharchenko.swiper.toolWindow.MyToolWindowFactory" id="MyToolWindow"/>
         <postStartupActivity implementation="com.github.cvzakharchenko.swiper.startup.MyProjectActivity" />
     </extensions>
+
+    <actions>
+        <action id="com.github.cvzakharchenko.swiper.LinePickerAction"
+                class="com.github.cvzakharchenko.swiper.actions.LinePickerAction"
+                text="Line Navigator"
+                description="Show a searchable list of lines in the current file">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <keyboard-shortcut keymap="$default" first-keystroke="alt F"/>
+        </action>
+    </actions>
 </idea-plugin>
