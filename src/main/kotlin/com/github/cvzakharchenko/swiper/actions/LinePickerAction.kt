@@ -262,6 +262,21 @@ class LinePickerAction : DumbAwareAction(
     private fun LineEntry.matches(words: List<String>): Boolean =
         words.all { searchableText.contains(it) }
 
+    private fun LineEntry.computeWeight(words: List<String>): Int {
+        if (words.isEmpty()) return 0
+        val distinctWords = words.distinct()
+        val lowerText = text.lowercase()
+        val matchesByWord = distinctWords.associateWith {
+            collectMatchInfos(text, lowerText, it)
+        }
+        var score = distinctWords.count { word ->
+            matchesByWord[word].orEmpty().any { it.qualifies }
+        }
+        val sharedTokenBonus = matchesByWord.sharedTokenBonus(distinctWords.size)
+        score += sharedTokenBonus
+        return score
+    }
+
     private companion object {
         private val POPUP_MIN_WIDTH = JBUI.scale(420)
         private val POPUP_MAX_WIDTH = JBUI.scale(900)
@@ -291,18 +306,30 @@ class LinePickerAction : DumbAwareAction(
     ): FilterResult {
         val words = query.parseSearchWords()
         val filtered = if (words.isEmpty()) source else source.filter { it.matches(words) }
-        model.replaceAll(filtered)
-        if (filtered.isEmpty()) {
+        val sorted = if (words.isEmpty()) {
+            filtered
+        } else {
+            filtered.sortedWith(
+                compareByDescending<LineEntry> { it.computeWeight(words) }
+                    .thenBy { it.lineNumber }
+            )
+        }
+        model.replaceAll(sorted)
+        if (sorted.isEmpty()) {
             list.clearSelection()
             resizePopupForItems(list, searchField, scrollPane, 0, popup, popupWidth, collapsed = true)
             return FilterResult(words, emptyList())
         }
-        val caretIndex = filtered.indexOfFirst { it.lineNumber == caretLine }
-        val targetIndex = if (caretIndex >= 0) caretIndex else 0
+        val targetIndex = if (words.isEmpty()) {
+            val caretIndex = sorted.indexOfFirst { it.lineNumber == caretLine }
+            if (caretIndex >= 0) caretIndex else 0
+        } else {
+            0
+        }
         list.selectedIndex = targetIndex
         list.ensureIndexIsVisible(targetIndex)
-        resizePopupForItems(list, searchField, scrollPane, filtered.size, popup, popupWidth, collapsed = false)
-        return FilterResult(words, filtered.toList())
+        resizePopupForItems(list, searchField, scrollPane, sorted.size, popup, popupWidth, collapsed = false)
+        return FilterResult(words, sorted.toList())
     }
 
     private fun resizePopupForItems(
@@ -672,5 +699,67 @@ private fun collectMatchesInText(lowerText: String, words: List<String>): List<I
     }
     merged += current
     return merged
+}
+
+private data class MatchInfo(
+    val start: Int,
+    val end: Int,
+    val tokenRange: IntRange,
+    val qualifies: Boolean
+)
+
+private fun collectMatchInfos(text: String, lowerText: String, word: String): List<MatchInfo> {
+    if (word.isEmpty() || lowerText.isEmpty()) return emptyList()
+    val matches = mutableListOf<MatchInfo>()
+    var index = lowerText.indexOf(word)
+    while (index >= 0 && index < text.length) {
+        matches += createMatchInfo(text, index, word.length)
+        index = lowerText.indexOf(word, index + word.length)
+    }
+    return matches
+}
+
+private fun createMatchInfo(text: String, start: Int, length: Int): MatchInfo {
+    val safeStart = start.coerceIn(0, text.length)
+    val safeEnd = (safeStart + length).coerceAtMost(text.length)
+    val boundary = safeStart == 0 || !text[safeStart - 1].isLetterOrDigit()
+    val startsWithCapital = text.getOrNull(safeStart)?.isUpperCase() == true
+    val tokenStart = findTokenStart(text, safeStart)
+    val tokenEndExclusive = findTokenEnd(text, safeEnd)
+    val tokenRange = IntRange(tokenStart, (tokenEndExclusive - 1).coerceAtLeast(tokenStart))
+    return MatchInfo(
+        start = safeStart,
+        end = safeEnd,
+        tokenRange = tokenRange,
+        qualifies = boundary || startsWithCapital
+    )
+}
+
+private fun findTokenStart(text: String, index: Int): Int {
+    var pos = index
+    while (pos > 0 && text[pos - 1].isLetterOrDigit()) {
+        pos--
+    }
+    return pos
+}
+
+private fun findTokenEnd(text: String, index: Int): Int {
+    var pos = index
+    while (pos < text.length && text[pos].isLetterOrDigit()) {
+        pos++
+    }
+    return pos
+}
+
+private fun Map<String, List<MatchInfo>>.sharedTokenBonus(wordCount: Int): Int {
+    if (wordCount <= 1) return 0
+    var shared: Set<IntRange>? = null
+    for (infos in values) {
+        val tokens = infos.filter { it.qualifies }.map { it.tokenRange }.toSet()
+        if (tokens.isEmpty()) return 0
+        shared = shared?.intersect(tokens) ?: tokens
+        if (shared.isNullOrEmpty()) return 0
+    }
+    return wordCount - 1
 }
 
