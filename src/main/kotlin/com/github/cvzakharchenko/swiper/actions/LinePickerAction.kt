@@ -9,6 +9,8 @@ import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.LogicalPosition
 import com.intellij.openapi.editor.ScrollType
+import com.intellij.openapi.editor.colors.EditorColors
+import com.intellij.openapi.editor.colors.EditorColorsManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
@@ -48,6 +50,10 @@ import javax.swing.ScrollPaneConstants
 import javax.swing.SwingUtilities
 import javax.swing.event.DocumentEvent
 import kotlin.math.roundToInt
+import com.intellij.openapi.editor.markup.HighlighterLayer
+import com.intellij.openapi.editor.markup.HighlighterTargetArea
+import com.intellij.openapi.editor.markup.RangeHighlighter
+import com.intellij.openapi.editor.markup.TextAttributes
 
 class LinePickerAction : DumbAwareAction(
     MyBundle.message("linePicker.action.text"),
@@ -75,10 +81,12 @@ class LinePickerAction : DumbAwareAction(
 
         IdeFocusManager.getInstance(project).requestFocus(editor.contentComponent, true)
         val originalCaret = editor.caretModel.logicalPosition
-        val previewController = CaretPreviewController(editor, originalCaret)
+        val previewController = CaretPreviewController(editor, document, originalCaret)
+        val searchHighlightManager = SearchHighlightManager(editor, document)
         var committedNavigation = false
         var previewArmed = false
         var currentSearchWords: List<String> = emptyList()
+        var currentMatchedEntries: List<LineEntry> = emptyList()
         val popupWidth = computePopupWidth(project, editor)
 
         val lines = buildList {
@@ -94,9 +102,11 @@ class LinePickerAction : DumbAwareAction(
         val listModel = CollectionListModel(lines.toMutableList())
         val caretLine = editor.caretModel.logicalPosition.line
 
+        val listRenderer = LineEntryRenderer { currentSearchWords }
+
         val list = JBList(listModel).apply {
             selectionMode = ListSelectionModel.SINGLE_SELECTION
-            cellRenderer = LineEntryRenderer()
+            cellRenderer = listRenderer
             emptyText.text = ""
         }
         val rowHeight = list.getFontMetrics(list.font).height + JBUI.scale(3)
@@ -116,8 +126,8 @@ class LinePickerAction : DumbAwareAction(
             if (event.valueIsAdjusting) return@addListSelectionListener
             if (!previewArmed) return@addListSelectionListener
             val entry = list.selectedValue ?: return@addListSelectionListener
-            val column = findFirstMatchColumn(document, entry.lineNumber, currentSearchWords)
-            previewController.preview(entry.lineNumber, column)
+            val target = findPreviewTarget(document, entry.lineNumber, currentSearchWords)
+            previewController.preview(target)
         }
 
         var popupRef: JBPopup? = null
@@ -128,7 +138,7 @@ class LinePickerAction : DumbAwareAction(
         searchField.addDocumentListener(object : DocumentAdapter() {
             override fun textChanged(e: DocumentEvent) {
                 previewArmed = true
-                currentSearchWords = applyFilter(
+                val filterResult = applyFilter(
                     lines,
                     listModel,
                     list,
@@ -139,6 +149,9 @@ class LinePickerAction : DumbAwareAction(
                     searchField,
                     popupWidth
                 )
+                currentSearchWords = filterResult.words
+                currentMatchedEntries = filterResult.entries
+                searchHighlightManager.update(currentSearchWords, currentMatchedEntries)
             }
         })
 
@@ -176,11 +189,12 @@ class LinePickerAction : DumbAwareAction(
                 if (!committedNavigation) {
                     previewController.restore()
                 }
+                searchHighlightManager.clear()
             }
         })
         installAltFMnemonicBlocker(popup)
 
-        currentSearchWords = applyFilter(
+        val initialFilterResult = applyFilter(
             lines,
             listModel,
             list,
@@ -191,6 +205,9 @@ class LinePickerAction : DumbAwareAction(
             searchField,
             popupWidth
         )
+        currentSearchWords = initialFilterResult.words
+        currentMatchedEntries = initialFilterResult.entries
+        searchHighlightManager.update(currentSearchWords, currentMatchedEntries)
         popup.showAtTopOfWindow(editor, project, popupWidth)
     }
 
@@ -254,6 +271,11 @@ class LinePickerAction : DumbAwareAction(
         private var currentPopup: JBPopup? = null
     }
 
+    private data class FilterResult(
+        val words: List<String>,
+        val entries: List<LineEntry>
+    )
+
     private fun applyFilter(
         source: List<LineEntry>,
         model: CollectionListModel<LineEntry>,
@@ -264,21 +286,21 @@ class LinePickerAction : DumbAwareAction(
         popup: JBPopup?,
         searchField: SearchTextField,
         popupWidth: Int
-    ): List<String> {
+    ): FilterResult {
         val words = query.parseSearchWords()
         val filtered = if (words.isEmpty()) source else source.filter { it.matches(words) }
         model.replaceAll(filtered)
         if (filtered.isEmpty()) {
             list.clearSelection()
             resizePopupForItems(list, searchField, scrollPane, 0, popup, popupWidth, collapsed = true)
-            return words
+            return FilterResult(words, emptyList())
         }
         val caretIndex = filtered.indexOfFirst { it.lineNumber == caretLine }
         val targetIndex = if (caretIndex >= 0) caretIndex else 0
         list.selectedIndex = targetIndex
         list.ensureIndexIsVisible(targetIndex)
         resizePopupForItems(list, searchField, scrollPane, filtered.size, popup, popupWidth, collapsed = false)
-        return words
+        return FilterResult(words, filtered.toList())
     }
 
     private fun resizePopupForItems(
@@ -331,10 +353,10 @@ class LinePickerAction : DumbAwareAction(
     ): () -> Unit {
         val chooseSelection = selection@{
             val entry = list.selectedValue ?: return@selection
-            val column = findFirstMatchColumn(document, entry.lineNumber, getSearchWords())
+            val target = findPreviewTarget(document, entry.lineNumber, getSearchWords())
             onCommit()
             popup.cancel()
-            navigateToLine(editor, entry.lineNumber, column)
+            navigateToLine(editor, target.line, target.column)
         }
 
         list.addKeyListener(object : KeyAdapter() {
@@ -402,30 +424,35 @@ class LinePickerAction : DumbAwareAction(
         list.ensureIndexIsVisible(next)
     }
 
-    private fun findFirstMatchColumn(document: Document, lineNumber: Int, words: List<String>): Int {
-        if (lineNumber !in 0 until document.lineCount) return 0
+    private fun findPreviewTarget(document: Document, lineNumber: Int, words: List<String>): PreviewTarget {
+        if (lineNumber !in 0 until document.lineCount) return PreviewTarget(lineNumber, 0, 0)
+        val normalizedWords = words.filter { it.isNotBlank() }.map { it.lowercase() }
+        val matches = collectLineMatchRanges(document, lineNumber, normalizedWords)
+        if (matches.isNotEmpty()) {
+            val first = matches.first()
+            return PreviewTarget(
+                lineNumber,
+                document.getLineStartOffset(lineNumber).let { start -> first.startOffset - start },
+                (first.endOffset - first.startOffset).coerceAtLeast(1)
+            )
+        }
         val startOffset = document.getLineStartOffset(lineNumber)
         val endOffset = document.getLineEndOffset(lineNumber)
         val lineText = document.getText(TextRange(startOffset, endOffset))
-        if (lineText.isEmpty()) return 0
-        val searchTargets = if (words.isEmpty()) emptyList() else words
-        val lower = lineText.lowercase()
-        var best = Int.MAX_VALUE
-        for (word in searchTargets) {
-            if (word.isEmpty()) continue
-            val idx = lower.indexOf(word)
-            if (idx >= 0 && idx < best) {
-                best = idx
-            }
+        val firstNonWhitespace = lineText.indexOfFirst { !it.isWhitespace() }
+        if (firstNonWhitespace >= 0) {
+            val length = lineText.substring(firstNonWhitespace)
+                .takeWhile { !it.isWhitespace() }
+                .length
+                .coerceAtLeast(1)
+            return PreviewTarget(lineNumber, firstNonWhitespace, length)
         }
-        if (best != Int.MAX_VALUE) {
-            return best
-        }
-        val firstNonSpace = lineText.indexOfFirst { !it.isWhitespace() }
-        return if (firstNonSpace >= 0) firstNonSpace else 0
+        return PreviewTarget(lineNumber, 0, lineText.length.coerceAtLeast(1))
     }
 
-    private class LineEntryRenderer : ColoredListCellRenderer<LineEntry>() {
+    private class LineEntryRenderer(
+        private val wordsProvider: () -> List<String>
+    ) : ColoredListCellRenderer<LineEntry>() {
         override fun customizeCellRenderer(
             list: JList<out LineEntry>,
             value: LineEntry?,
@@ -434,37 +461,119 @@ class LinePickerAction : DumbAwareAction(
             hasFocus: Boolean
         ) {
             if (value == null) return
-            append(value.text, SimpleTextAttributes.REGULAR_ATTRIBUTES)
+            val text = value.text
+            val searchWords = wordsProvider().filter { it.isNotBlank() }.map { it.lowercase() }
+            if (searchWords.isEmpty()) {
+                append(text, SimpleTextAttributes.REGULAR_ATTRIBUTES)
+                return
+            }
+            val lower = text.lowercase()
+            val matches = collectMatches(lower, searchWords)
+            if (matches.isEmpty()) {
+                append(text, SimpleTextAttributes.REGULAR_ATTRIBUTES)
+                return
+            }
+            val highlightAttributes = SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, list.foreground)
+            var currentIndex = 0
+            for (range in matches) {
+                if (range.first > currentIndex) {
+                    append(text.substring(currentIndex, range.first), SimpleTextAttributes.REGULAR_ATTRIBUTES)
+                }
+                append(text.substring(range.first, range.last + 1), highlightAttributes)
+                currentIndex = range.last + 1
+            }
+            if (currentIndex < text.length) {
+                append(text.substring(currentIndex), SimpleTextAttributes.REGULAR_ATTRIBUTES)
+            }
         }
+
+        private fun collectMatches(lineLower: String, words: List<String>): List<IntRange> =
+            collectMatchesInText(lineLower, words)
     }
 
     private class CaretPreviewController(
         private val editor: Editor,
+        private val document: Document,
         originalPosition: LogicalPosition
     ) {
         private val originalLine = originalPosition.line
         private val originalColumn = originalPosition.column
-        private var lastPreviewPosition: Pair<Int, Int>? = null
+        private val markupModel = editor.markupModel
+        private val highlightAttributes = EditorColorsManager.getInstance().globalScheme
+            .getAttributes(EditorColors.SEARCH_RESULT_ATTRIBUTES) ?: TextAttributes()
+        private var lastPreviewTarget: PreviewTarget? = null
+        private var highlighter: RangeHighlighter? = null
 
-        fun preview(lineNumber: Int, column: Int) {
-            val document = editor.document
-            if (lineNumber !in 0 until document.lineCount) return
-            val safeColumn = column.coerceAtLeast(0)
-            val position = lineNumber to safeColumn
-            if (lastPreviewPosition == position) return
-            lastPreviewPosition = position
-            editor.caretModel.moveToLogicalPosition(LogicalPosition(lineNumber, safeColumn))
+        fun preview(target: PreviewTarget) {
+            if (target.line !in 0 until document.lineCount) return
+            if (lastPreviewTarget == target) return
+            lastPreviewTarget = target
+            val safeColumn = target.column.coerceAtLeast(0)
+            val startOffset = document.getLineStartOffset(target.line) + safeColumn
+            val endOffset = (startOffset + target.length).coerceAtMost(document.getLineEndOffset(target.line))
+            clearHighlight()
+            if (endOffset > startOffset) {
+                highlighter = markupModel.addRangeHighlighter(
+                    startOffset,
+                    endOffset,
+                    HighlighterLayer.SELECTION - 1,
+                    highlightAttributes,
+                    HighlighterTargetArea.EXACT_RANGE
+                )
+            }
+            editor.caretModel.moveToLogicalPosition(LogicalPosition(target.line, safeColumn))
             editor.scrollingModel.scrollToCaret(ScrollType.MAKE_VISIBLE)
         }
 
         fun restore() {
-            val document = editor.document
             if (document.lineCount == 0) return
             val line = originalLine.coerceIn(0, document.lineCount - 1)
             val column = originalColumn.coerceAtLeast(0)
             editor.caretModel.moveToLogicalPosition(LogicalPosition(line, column))
             editor.scrollingModel.scrollToCaret(ScrollType.MAKE_VISIBLE)
-            lastPreviewPosition = null
+            lastPreviewTarget = null
+            clearHighlight()
+        }
+
+        private fun clearHighlight() {
+            highlighter?.let { markupModel.removeHighlighter(it) }
+            highlighter = null
+        }
+    }
+
+    private data class PreviewTarget(val line: Int, val column: Int, val length: Int)
+
+    private class SearchHighlightManager(
+        private val editor: Editor,
+        private val document: Document
+    ) {
+        private val markupModel = editor.markupModel
+        private val highlightAttributes = EditorColorsManager.getInstance().globalScheme
+            .getAttributes(EditorColors.TEXT_SEARCH_RESULT_ATTRIBUTES) ?: TextAttributes()
+        private val highlighters = mutableListOf<RangeHighlighter>()
+
+        fun update(words: List<String>, entries: List<LineEntry>) {
+            clear()
+            val normalizedWords = words.filter { it.isNotBlank() }.map { it.lowercase() }
+            if (normalizedWords.isEmpty() || entries.isEmpty()) return
+            for (entry in entries) {
+                val ranges = collectLineMatchRanges(document, entry.lineNumber, normalizedWords)
+                for (range in ranges) {
+                    highlighters += markupModel.addRangeHighlighter(
+                        range.startOffset,
+                        range.endOffset,
+                        HighlighterLayer.SELECTION - 2,
+                        highlightAttributes,
+                        HighlighterTargetArea.EXACT_RANGE
+                    )
+                }
+            }
+        }
+
+        fun clear() {
+            if (highlighters.isEmpty()) return
+            highlighters.forEach { markupModel.removeHighlighter(it) }
+            highlighters.clear()
         }
     }
 
@@ -509,5 +618,53 @@ class LinePickerAction : DumbAwareAction(
             )
         )
     }
+}
+
+private data class LineMatchRange(val startOffset: Int, val endOffset: Int)
+
+private fun collectLineMatchRanges(
+    document: Document,
+    lineNumber: Int,
+    words: List<String>
+): List<LineMatchRange> {
+    if (lineNumber !in 0 until document.lineCount) return emptyList()
+    val startOffset = document.getLineStartOffset(lineNumber)
+    val endOffset = document.getLineEndOffset(lineNumber)
+    val text = document.getText(TextRange(startOffset, endOffset))
+    val matches = collectMatchesInText(text.lowercase(), words)
+    return matches.map { range ->
+        LineMatchRange(
+            startOffset + range.first,
+            (startOffset + range.last + 1).coerceAtMost(endOffset)
+        )
+    }
+}
+
+private fun collectMatchesInText(lowerText: String, words: List<String>): List<IntRange> {
+    if (lowerText.isEmpty()) return emptyList()
+    val ranges = mutableListOf<IntRange>()
+    for (word in words) {
+        var idx = lowerText.indexOf(word)
+        while (idx >= 0) {
+            val end = (idx + word.length - 1).coerceAtLeast(idx)
+            ranges += IntRange(idx, end)
+            idx = lowerText.indexOf(word, idx + word.length)
+        }
+    }
+    if (ranges.isEmpty()) return emptyList()
+    val sorted = ranges.sortedBy { it.first }
+    val merged = mutableListOf<IntRange>()
+    var current = sorted.first()
+    for (i in 1 until sorted.size) {
+        val next = sorted[i]
+        current = if (next.first <= current.last + 1) {
+            IntRange(current.first, maxOf(current.last, next.last))
+        } else {
+            merged += current
+            next
+        }
+    }
+    merged += current
+    return merged
 }
 
