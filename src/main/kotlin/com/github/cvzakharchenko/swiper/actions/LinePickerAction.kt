@@ -254,9 +254,8 @@ class LinePickerAction : DumbAwareAction(
     }
 
     private data class LineEntry(val lineNumber: Int, val text: String) {
-        val displayText: String = text
         val searchableText: String = text.lowercase()
-        override fun toString(): String = displayText
+        override fun toString(): String = text
     }
 
     private fun LineEntry.matches(words: List<String>): Boolean =
@@ -502,7 +501,7 @@ class LinePickerAction : DumbAwareAction(
                 append(text, SimpleTextAttributes.REGULAR_ATTRIBUTES)
                 return
             }
-            val highlightAttributes = SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, list.foreground)
+            val highlightAttributes = SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, null)
             var currentIndex = 0
             for (range in matches) {
                 if (range.first > currentIndex) {
