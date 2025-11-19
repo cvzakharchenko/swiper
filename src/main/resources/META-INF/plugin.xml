@@ -8,11 +8,6 @@
 
     <resource-bundle>messages.MyBundle</resource-bundle>
 
-    <extensions defaultExtensionNs="com.intellij">
-        <toolWindow factoryClass="com.github.cvzakharchenko.swiper.toolWindow.MyToolWindowFactory" id="MyToolWindow"/>
-        <postStartupActivity implementation="com.github.cvzakharchenko.swiper.startup.MyProjectActivity" />
-    </extensions>
-
     <actions>
         <action id="com.github.cvzakharchenko.swiper.LinePickerAction"
                 class="com.github.cvzakharchenko.swiper.actions.LinePickerAction"
