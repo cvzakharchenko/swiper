@@ -234,8 +234,7 @@ class LinePickerAction : DumbAwareAction(
         if (trimmed.isBlank()) {
             return MyBundle.message("linePicker.emptyLine")
         }
-        val singleLine = StringUtil.replace(trimmed, "\t", "    ")
-        return StringUtil.shortenTextWithEllipsis(singleLine, 120, 0)
+        return StringUtil.replace(trimmed, "\t", "    ")
     }
 
     private fun installAltFMnemonicBlocker(popup: JBPopup) {
@@ -255,7 +254,8 @@ class LinePickerAction : DumbAwareAction(
 
     private data class LineEntry(val lineNumber: Int, val text: String) {
         val searchableText: String = text.lowercase()
-        override fun toString(): String = text
+        val displayText: String = StringUtil.shortenTextWithEllipsis(text, 120, 0)
+        override fun toString(): String = displayText
     }
 
     private fun LineEntry.matches(words: List<String>): Boolean =
@@ -489,29 +489,29 @@ class LinePickerAction : DumbAwareAction(
             hasFocus: Boolean
         ) {
             if (value == null) return
-            val text = value.text
+            val displayText = value.displayText
             val searchWords = wordsProvider().filter { it.isNotBlank() }.map { it.lowercase() }
             if (searchWords.isEmpty()) {
-                append(text, SimpleTextAttributes.REGULAR_ATTRIBUTES)
+                append(displayText, SimpleTextAttributes.REGULAR_ATTRIBUTES)
                 return
             }
-            val lower = text.lowercase()
+            val lower = displayText.lowercase()
             val matches = collectMatches(lower, searchWords)
             if (matches.isEmpty()) {
-                append(text, SimpleTextAttributes.REGULAR_ATTRIBUTES)
+                append(displayText, SimpleTextAttributes.REGULAR_ATTRIBUTES)
                 return
             }
             val highlightAttributes = SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, null)
             var currentIndex = 0
             for (range in matches) {
                 if (range.first > currentIndex) {
-                    append(text.substring(currentIndex, range.first), SimpleTextAttributes.REGULAR_ATTRIBUTES)
+                    append(displayText.substring(currentIndex, range.first), SimpleTextAttributes.REGULAR_ATTRIBUTES)
                 }
-                append(text.substring(range.first, range.last + 1), highlightAttributes)
+                append(displayText.substring(range.first, range.last + 1), highlightAttributes)
                 currentIndex = range.last + 1
             }
-            if (currentIndex < text.length) {
-                append(text.substring(currentIndex), SimpleTextAttributes.REGULAR_ATTRIBUTES)
+            if (currentIndex < displayText.length) {
+                append(displayText.substring(currentIndex), SimpleTextAttributes.REGULAR_ATTRIBUTES)
             }
         }
 
